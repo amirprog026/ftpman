@@ -12,42 +12,43 @@ class FTPUserService:
         try:
             # Check if user already exists
             try:
-                subprocess.run(['id', username], check=True, capture_output=True)
+                subprocess.run(['id', username], check=True, capture_output=True, text=True)
                 return False, f"User {username} already exists"
             except subprocess.CalledProcessError:
                 # User doesn't exist, continue with creation
                 pass
             
-            # Create user with home directory and nologin shell
-            subprocess.run([
+            # Create user with home directory and bash shell
+            result = subprocess.run([
                 'sudo', 'useradd', 
                 '-m',                    # Create home directory
                 '-d', home_dir,         # Set home directory
-                '-s', '/bin/bash',      # Set shell (changed from /sbin/nologin to allow FTP)
+                '-s', '/bin/bash',      # Set shell to allow FTP
                 username
-            ], check=True, capture_output=True)
+            ], check=True, capture_output=True, text=True)
             
             # Set password using chpasswd (more reliable than passwd)
             password_input = f"{username}:{password}"
-            process = subprocess.run([
+            subprocess.run([
                 'sudo', 'chpasswd'
             ], input=password_input, text=True, check=True, capture_output=True)
             
             # Set proper permissions for home directory
-            subprocess.run(['sudo', 'chmod', '755', home_dir], check=True)
-            subprocess.run(['sudo', 'chown', f'{username}:{username}', home_dir], check=True)
+            subprocess.run(['sudo', 'chmod', '755', home_dir], check=True, capture_output=True, text=True)
+            subprocess.run(['sudo', 'chown', f'{username}:{username}', home_dir], check=True, capture_output=True, text=True)
             
             # Create a test file in user's home directory
             test_file = os.path.join(home_dir, 'welcome.txt')
             subprocess.run([
                 'sudo', 'bash', '-c', 
-                f'echo "Welcome to FTP server!" > {test_file} && chown {username}:{username} {test_file}'
-            ], check=True)
+                f'echo "Welcome to FTP server, {username}!" > {test_file} && chown {username}:{username} {test_file}'
+            ], check=True, capture_output=True, text=True)
             
             return True, f"User {username} created successfully"
             
         except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.decode() if e.stderr else str(e)
+            # e.stderr is already a string when text=True is used
+            error_msg = e.stderr if e.stderr else str(e)
             return False, f"Error creating user: {error_msg}"
         except Exception as e:
             return False, f"Unexpected error: {str(e)}"
@@ -60,12 +61,12 @@ class FTPUserService:
             FTPUserService._remove_from_user_list(username)
             
             # Delete system user and home directory
-            subprocess.run(['sudo', 'userdel', '-r', username], check=True, capture_output=True)
+            subprocess.run(['sudo', 'userdel', '-r', username], check=True, capture_output=True, text=True)
             
             return True, f"User {username} deleted successfully"
             
         except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.decode() if e.stderr else str(e)
+            error_msg = e.stderr if e.stderr else str(e)
             return False, f"Error deleting user: {error_msg}"
         except Exception as e:
             return False, f"Unexpected error: {str(e)}"
@@ -128,19 +129,34 @@ class FTPUserService:
     def _add_to_user_list(username):
         """Add username to vsftpd user_list file"""
         try:
+            # Ensure the user_list file exists
+            if not os.path.exists(FTPUserService.USER_LIST_FILE):
+                # Create the file with proper permissions
+                subprocess.run(['sudo', 'touch', FTPUserService.USER_LIST_FILE], check=True)
+                subprocess.run(['sudo', 'chmod', '644', FTPUserService.USER_LIST_FILE], check=True)
+            
             # Check if user is already in the list
-            if os.path.exists(FTPUserService.USER_LIST_FILE):
+            existing_users = []
+            try:
                 with open(FTPUserService.USER_LIST_FILE, 'r') as f:
                     existing_users = [line.strip() for line in f.readlines()]
-                    if username in existing_users:
-                        return True, f"User {username} already in block list"
+            except FileNotFoundError:
+                pass
             
-            # Add user to the list
-            with open(FTPUserService.USER_LIST_FILE, 'a') as f:
-                f.write(f"{username}\n")
+            if username in existing_users:
+                return True, f"User {username} already in block list"
+            
+            # Add user to the list using sudo
+            subprocess.run([
+                'sudo', 'bash', '-c', 
+                f'echo "{username}" >> {FTPUserService.USER_LIST_FILE}'
+            ], check=True, capture_output=True, text=True)
             
             return True, f"User {username} added to block list"
             
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr if e.stderr else str(e)
+            return False, f"Error adding user to block list: {error_msg}"
         except Exception as e:
             return False, f"Error adding user to block list: {str(e)}"
     
@@ -152,18 +168,29 @@ class FTPUserService:
                 return True, "User list file doesn't exist"
             
             # Read current list
-            with open(FTPUserService.USER_LIST_FILE, 'r') as f:
-                lines = f.readlines()
+            try:
+                with open(FTPUserService.USER_LIST_FILE, 'r') as f:
+                    lines = f.readlines()
+            except FileNotFoundError:
+                return True, "User list file doesn't exist"
             
             # Filter out the username
             filtered_lines = [line for line in lines if line.strip() != username]
             
-            # Write back the filtered list
-            with open(FTPUserService.USER_LIST_FILE, 'w') as f:
+            # Write back the filtered list using temporary file
+            temp_file = f"{FTPUserService.USER_LIST_FILE}.tmp"
+            with open(temp_file, 'w') as f:
                 f.writelines(filtered_lines)
+            
+            # Move temp file to actual file with sudo
+            subprocess.run(['sudo', 'mv', temp_file, FTPUserService.USER_LIST_FILE], check=True)
+            subprocess.run(['sudo', 'chmod', '644', FTPUserService.USER_LIST_FILE], check=True)
             
             return True, f"User {username} removed from block list"
             
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr if e.stderr else str(e)
+            return False, f"Error removing user from block list: {error_msg}"
         except Exception as e:
             return False, f"Error removing user from block list: {str(e)}"
     
@@ -172,10 +199,10 @@ class FTPUserService:
         """Restart VSFTPD service"""
         try:
             subprocess.run(['sudo', 'systemctl', 'restart', 'vsftpd'], 
-                         check=True, capture_output=True)
+                         check=True, capture_output=True, text=True)
             return True, "VSFTPD restarted successfully"
         except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.decode() if e.stderr else str(e)
+            error_msg = e.stderr if e.stderr else str(e)
             return False, f"Failed to restart VSFTPD: {error_msg}"
     
     @staticmethod
@@ -187,17 +214,18 @@ class FTPUserService:
                 'awk', '-F:', '$3>=1000 && $3<65534 {print $1}', '/etc/passwd'
             ], capture_output=True, text=True, check=True)
             
-            users = result.stdout.strip().split('\n')
+            users = result.stdout.strip().split('\n') if result.stdout.strip() else []
             return [user for user in users if user]  # Filter empty strings
             
         except Exception as e:
+            print(f"Error getting system users: {e}")
             return []
     
     @staticmethod
     def check_user_exists(username):
         """Check if system user exists"""
         try:
-            subprocess.run(['id', username], check=True, capture_output=True)
+            subprocess.run(['id', username], check=True, capture_output=True, text=True)
             return True
         except subprocess.CalledProcessError:
             return False
@@ -218,3 +246,38 @@ class FTPUserService:
             
         except Exception:
             return f"/home/{username}"
+    
+    @staticmethod
+    def get_blocked_users():
+        """Get list of blocked users from user_list file"""
+        try:
+            if not os.path.exists(FTPUserService.USER_LIST_FILE):
+                return []
+            
+            with open(FTPUserService.USER_LIST_FILE, 'r') as f:
+                blocked_users = [line.strip() for line in f.readlines() if line.strip()]
+            
+            return blocked_users
+            
+        except Exception as e:
+            print(f"Error reading blocked users: {e}")
+            return []
+    
+    @staticmethod
+    def test_ftp_connection(username, password, host='localhost'):
+        """Test FTP connection for a user"""
+        try:
+            import ftplib
+            
+            ftp = ftplib.FTP()
+            ftp.connect(host, 21)
+            ftp.login(username, password)
+            
+            # Try to list directory
+            files = ftp.nlst()
+            ftp.quit()
+            
+            return True, f"FTP connection successful. Files: {len(files)}"
+            
+        except Exception as e:
+            return False, f"FTP connection failed: {str(e)}"

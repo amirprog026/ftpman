@@ -89,8 +89,10 @@ class FTPConfigService:
                 f.writelines(new_lines)
             
             # Move temp file to actual config file
-            subprocess.run(['sudo', 'mv', temp_file, FTPConfigService.CONFIG_FILE], check=True)
-            subprocess.run(['sudo', 'chmod', '644', FTPConfigService.CONFIG_FILE], check=True)
+            subprocess.run(['sudo', 'mv', temp_file, FTPConfigService.CONFIG_FILE], 
+                         check=True, capture_output=True, text=True)
+            subprocess.run(['sudo', 'chmod', '644', FTPConfigService.CONFIG_FILE], 
+                         check=True, capture_output=True, text=True)
             
             # Log change
             ConfigChange.create(
@@ -107,6 +109,9 @@ class FTPConfigService:
             
             return True, "Configuration updated successfully"
             
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr if e.stderr else str(e)
+            return False, f"Error updating config: {error_msg}"
         except Exception as e:
             return False, f"Error updating config: {str(e)}"
     
@@ -120,9 +125,12 @@ class FTPConfigService:
             
             subprocess.run([
                 'sudo', 'cp', FTPConfigService.CONFIG_FILE, backup_file
-            ], check=True)
+            ], check=True, capture_output=True, text=True)
             
             return True, f"Config backed up to {backup_file}"
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr if e.stderr else str(e)
+            return False, f"Backup failed: {error_msg}"
         except Exception as e:
             return False, str(e)
     
@@ -131,10 +139,10 @@ class FTPConfigService:
         """Restart VSFTPD service"""
         try:
             subprocess.run(['sudo', 'systemctl', 'restart', 'vsftpd'], 
-                         check=True, capture_output=True)
+                         check=True, capture_output=True, text=True)
             return True, "VSFTPD restarted successfully"
         except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.decode() if e.stderr else str(e)
+            error_msg = e.stderr if e.stderr else str(e)
             return False, f"Failed to restart VSFTPD: {error_msg}"
     
     @staticmethod
@@ -153,3 +161,31 @@ class FTPConfigService:
                 
         except Exception as e:
             return False, f"Error validating config: {str(e)}"
+    
+    @staticmethod
+    def get_service_status():
+        """Get VSFTPD service status"""
+        try:
+            result = subprocess.run([
+                'sudo', 'systemctl', 'is-active', 'vsftpd'
+            ], capture_output=True, text=True)
+            
+            is_active = result.stdout.strip() == 'active'
+            
+            # Get detailed status
+            status_result = subprocess.run([
+                'sudo', 'systemctl', 'status', 'vsftpd'
+            ], capture_output=True, text=True)
+            
+            return {
+                'active': is_active,
+                'status': result.stdout.strip(),
+                'details': status_result.stdout
+            }
+            
+        except Exception as e:
+            return {
+                'active': False,
+                'status': 'unknown',
+                'details': f'Error: {str(e)}'
+            }
