@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# VSFTPD Manager Setup Script with Virtual Environment
+# VSFTPD Manager Setup Script - Root Approach
 
 echo "Starting VSFTPD Manager setup..."
 
@@ -23,56 +23,96 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Check if running as root
-if [[ $EUID -eq 0 ]]; then
-   print_error "This script should not be run as root for security reasons"
-   print_status "Please run as a regular user with sudo privileges"
+# Check if running as root for this setup
+if [[ $EUID -ne 0 ]]; then
+   print_error "This setup script must be run as root for FTP user management"
+   print_status "Please run: sudo ./setup.sh"
    exit 1
 fi
 
+# Get the original user who ran sudo
+ORIGINAL_USER=${SUDO_USER:-$USER}
+if [ "$ORIGINAL_USER" = "root" ]; then
+    print_error "Please run this script with sudo from a regular user account"
+    print_status "Example: sudo ./setup.sh"
+    exit 1
+fi
+
+print_status "Setting up VSFTPD Manager for user: $ORIGINAL_USER"
+
 # Update system
 print_status "Updating system packages..."
-sudo apt update
+apt update
 
 # Install required system packages
 print_status "Installing system dependencies..."
-sudo apt install -y python3 python3-pip python3-venv vsftpd sqlite3 net-tools psmisc
+apt install -y python3 python3-pip python3-venv vsftpd sqlite3 net-tools psmisc
 
 # Create application directory
 APP_DIR="/opt/vsftpd-manager"
 print_status "Creating application directory: $APP_DIR"
-sudo mkdir -p $APP_DIR
-sudo chown $USER:$USER $APP_DIR
+mkdir -p $APP_DIR
 
 # Copy application files
 print_status "Copying application files..."
 cp -r . $APP_DIR/
 cd $APP_DIR
 
-# Create virtual environment
-print_status "Creating Python virtual environment..."
-python3 -m venv venv
+# Set ownership to original user for development
+chown -R $ORIGINAL_USER:$ORIGINAL_USER $APP_DIR
 
-# Activate virtual environment and install dependencies
-print_status "Installing Python dependencies in virtual environment..."
+# Create virtual environment as original user
+print_status "Creating Python virtual environment..."
+sudo -u $ORIGINAL_USER python3 -m venv venv
+
+# Install dependencies as original user
+print_status "Installing Python dependencies..."
+sudo -u $ORIGINAL_USER bash -c "
 source venv/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install Flask==2.3.3
+pip install Werkzeug==2.3.7
+pip install flask-login==0.6.3
+pip install peewee==3.16.3
+pip install psutil==5.9.5
+pip install Jinja2==3.1.2
+pip install MarkupSafe==2.1.3
+pip install click==8.1.7
+pip install itsdangerous==2.1.2
+"
+
+# Verify installation
+print_status "Verifying package installation..."
+sudo -u $ORIGINAL_USER bash -c "
+cd $APP_DIR
+source venv/bin/activate
+python3 -c '
+try:
+    from flask import Flask
+    from flask_login import LoginManager
+    from peewee import SqliteDatabase
+    import psutil
+    print(\"All packages imported successfully!\")
+except ImportError as e:
+    print(f\"Import error: {e}\")
+    exit(1)
+'
+"
 
 # Create vsftpd directories
 print_status "Setting up VSFTPD directories..."
-sudo mkdir -p /etc/vsftpd
-sudo touch /etc/vsftpd/user_list
+mkdir -p /etc/vsftpd
+touch /etc/vsftpd/user_list
 
 # Backup original vsftpd config if it exists
 if [ -f /etc/vsftpd.conf ]; then
     print_status "Backing up existing VSFTPD configuration..."
-    sudo cp /etc/vsftpd.conf /etc/vsftpd.conf.backup.$(date +%Y%m%d_%H%M%S)
+    cp /etc/vsftpd.conf /etc/vsftpd.conf.backup.$(date +%Y%m%d_%H%M%S)
 fi
 
 # Create VSFTPD configuration
 print_status "Creating VSFTPD configuration..."
-sudo tee /etc/vsftpd/vsftpd.conf > /dev/null <<EOF
+cat > /etc/vsftpd/vsftpd.conf << 'EOF'
 # VSFTPD Configuration for VSFTPD Manager
 listen=YES
 listen_ipv6=NO
@@ -101,29 +141,38 @@ vsftpd_log_file=/var/log/vsftpd.log
 pasv_enable=YES
 pasv_min_port=21100
 pasv_max_port=21110
-pasv_address=\$(hostname -I | awk '{print \$1}')
 EOF
 
+# Get server IP for passive mode
+SERVER_IP=$(hostname -I | awk '{print $1}')
+if [ ! -z "$SERVER_IP" ]; then
+    echo "pasv_address=$SERVER_IP" >> /etc/vsftpd/vsftpd.conf
+fi
+
 # Set proper permissions
-print_status "Setting file permissions..."
-sudo chmod 644 /etc/vsftpd/vsftpd.conf
-sudo chmod 644 /etc/vsftpd/user_list
+chmod 644 /etc/vsftpd/vsftpd.conf
+chmod 644 /etc/vsftpd/user_list
 
 # Create log file
-sudo touch /var/log/vsftpd.log
-sudo chmod 644 /var/log/vsftpd.log
+touch /var/log/vsftpd.log
+chmod 644 /var/log/vsftpd.log
 
-# Create startup script
+# Create startup script that runs as root
 print_status "Creating startup script..."
 cat > $APP_DIR/start.sh << 'EOF'
 #!/bin/bash
 
-# VSFTPD Manager Startup Script
+# VSFTPD Manager Startup Script (runs as root)
 APP_DIR="/opt/vsftpd-manager"
 cd $APP_DIR
 
 # Activate virtual environment
 source venv/bin/activate
+
+# Set environment variables
+export FLASK_HOST="0.0.0.0"
+export FLASK_PORT="5000"
+export FLASK_DEBUG="False"
 
 # Initialize database and create default admin user
 python3 -c "
@@ -135,24 +184,23 @@ try:
         admin.set_password('admin123')
         admin.save()
         print('Default admin user created successfully')
-        print('Username: admin')
-        print('Password: admin123')
+        print('Username: admin, Password: admin123')
     else:
         print('Admin user already exists')
 except Exception as e:
     print(f'Error initializing database: {e}')
 "
 
-# Start Flask application
-echo "Starting VSFTPD Manager..."
+# Start Flask application as root
+echo "Starting VSFTPD Manager as root..."
 python3 app.py
 EOF
 
 chmod +x $APP_DIR/start.sh
 
-# Create systemd service
+# Create systemd service that runs as root
 print_status "Creating systemd service..."
-sudo tee /etc/systemd/system/vsftpd-manager.service > /dev/null <<EOF
+cat > /etc/systemd/system/vsftpd-manager.service << EOF
 [Unit]
 Description=VSFTPD Manager Flask Application
 After=network.target vsftpd.service
@@ -160,8 +208,8 @@ Requires=vsftpd.service
 
 [Service]
 Type=simple
-User=$USER
-Group=$USER
+User=root
+Group=root
 WorkingDirectory=$APP_DIR
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=$APP_DIR/start.sh
@@ -174,48 +222,37 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-# Create sudoers file for the application user
-print_status "Setting up sudo permissions for VSFTPD management..."
-sudo tee /etc/sudoers.d/vsftpd-manager > /dev/null <<EOF
-# Allow $USER to manage VSFTPD and users without password
-$USER ALL=(ALL) NOPASSWD: /usr/sbin/useradd
-$USER ALL=(ALL) NOPASSWD: /usr/sbin/userdel
-$USER ALL=(ALL) NOPASSWD: /usr/bin/passwd
-$USER ALL=(ALL) NOPASSWD: /bin/systemctl restart vsftpd
-$USER ALL=(ALL) NOPASSWD: /bin/systemctl start vsftpd
-$USER ALL=(ALL) NOPASSWD: /bin/systemctl stop vsftpd
-$USER ALL=(ALL) NOPASSWD: /bin/systemctl status vsftpd
-$USER ALL=(ALL) NOPASSWD: /bin/kill
-$USER ALL=(ALL) NOPASSWD: /bin/chmod
-$USER ALL=(ALL) NOPASSWD: /bin/chown
-$USER ALL=(ALL) NOPASSWD: /usr/bin/netstat
-EOF
-
 # Enable and start VSFTPD service
 print_status "Enabling and starting VSFTPD service..."
-sudo systemctl enable vsftpd
-sudo systemctl start vsftpd
+systemctl enable vsftpd
+systemctl start vsftpd
 
 # Check VSFTPD status
-if sudo systemctl is-active --quiet vsftpd; then
+if systemctl is-active --quiet vsftpd; then
     print_status "VSFTPD service is running successfully"
 else
     print_warning "VSFTPD service is not running. Checking status..."
-    sudo systemctl status vsftpd
+    systemctl status vsftpd
 fi
 
 # Enable the VSFTPD Manager service
 print_status "Enabling VSFTPD Manager service..."
-sudo systemctl daemon-reload
-sudo systemctl enable vsftpd-manager
+systemctl daemon-reload
+systemctl enable vsftpd-manager
 
-# Create a manual start script for development
-cat > $APP_DIR/run_dev.sh << 'EOF'
+# Create development script
+cat > $APP_DIR/run_dev.sh << EOF
 #!/bin/bash
 
-# Development startup script
+# Development startup script (run as root)
+if [[ \$EUID -ne 0 ]]; then
+   echo "Development mode must also run as root for user management"
+   echo "Please run: sudo ./run_dev.sh"
+   exit 1
+fi
+
 APP_DIR="/opt/vsftpd-manager"
-cd $APP_DIR
+cd \$APP_DIR
 
 # Activate virtual environment
 source venv/bin/activate
@@ -223,6 +260,8 @@ source venv/bin/activate
 # Set Flask environment variables
 export FLASK_ENV=development
 export FLASK_DEBUG=1
+export FLASK_HOST=0.0.0.0
+export FLASK_PORT=5000
 
 # Initialize database
 python3 -c "
@@ -247,13 +286,13 @@ EOF
 
 chmod +x $APP_DIR/run_dev.sh
 
-# Create firewall rules (if UFW is available)
+# Configure firewall (if UFW is available)
 if command -v ufw &> /dev/null; then
     print_status "Configuring firewall rules..."
-    sudo ufw allow 21/tcp
-    sudo ufw allow 5000/tcp
-    sudo ufw allow 21100:21110/tcp
-    print_status "Firewall rules added for FTP (21), Web Interface (5000), and Passive ports (21100-21110)"
+    ufw allow 21/tcp
+    ufw allow 5000/tcp
+    ufw allow 21100:21110/tcp
+    print_status "Firewall rules added"
 fi
 
 print_status "Setup completed successfully!"
@@ -267,26 +306,19 @@ echo "  Username: admin"
 echo "  Password: admin123"
 echo ""
 echo -e "${YELLOW}Service Management:${NC}"
-echo "  Start service:    sudo systemctl start vsftpd-manager"
-echo "  Stop service:     sudo systemctl stop vsftpd-manager"
-echo "  Service status:   sudo systemctl status vsftpd-manager"
+echo "  Start service:    systemctl start vsftpd-manager"
+echo "  Stop service:     systemctl stop vsftpd-manager"
+echo "  Service status:   systemctl status vsftpd-manager"
 echo "  View logs:        journalctl -u vsftpd-manager -f"
 echo ""
 echo -e "${YELLOW}Development Mode:${NC}"
-echo "  Run manually:     $APP_DIR/run_dev.sh"
+echo "  Run manually:     sudo $APP_DIR/run_dev.sh"
 echo ""
 echo -e "${YELLOW}Access URLs:${NC}"
 echo "  Web Interface:    http://$(hostname -I | awk '{print $1}'):5000"
 echo "  Local Access:     http://localhost:5000"
 echo ""
-echo -e "${YELLOW}Important Files:${NC}"
-echo "  Application:      $APP_DIR"
-echo "  VSFTPD Config:    /etc/vsftpd/vsftpd.conf"
-echo "  User List:        /etc/vsftpd/user_list"
-echo "  Logs:             /var/log/vsftpd.log"
-echo ""
 echo -e "${GREEN}Next Steps:${NC}"
-echo "1. Change the default admin password after first login"
-echo "2. Configure your firewall if needed"
-echo "3. Start the service: sudo systemctl start vsftpd-manager"
+echo "1. Start the service: systemctl start vsftpd-manager"
+echo "2. Change the default admin password after first login"
 echo ""
