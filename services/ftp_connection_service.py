@@ -1,5 +1,5 @@
 import subprocess
-import psutil
+import psutil,os
 import re
 from datetime import datetime
 from models import FTPConnection, db
