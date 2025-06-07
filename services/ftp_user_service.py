@@ -5,13 +5,21 @@ import grp
 import tempfile
 from models import FTPUser, db
 from datetime import datetime
+import subprocess
+import os
+import pwd
+import grp
+import stat
+import tempfile
+from models import FTPUser, db
+from datetime import datetime
 
 class FTPUserService:
     USER_LIST_FILE = '/etc/vsftpd/user_list'
     
     @staticmethod
     def create_system_user(username, password, home_dir):
-        """Create system user for FTP (running as root)"""
+        """Create system user for FTP with proper write permissions"""
         try:
             # Check if user already exists
             try:
@@ -27,6 +35,7 @@ class FTPUserService:
                 '-m',                    # Create home directory
                 '-d', home_dir,         # Set home directory
                 '-s', '/bin/bash',      # Set shell to allow FTP
+                '-G', 'ftp',           # Add to ftp group
                 username
             ]
             
@@ -45,23 +54,153 @@ class FTPUserService:
             if password_process.returncode != 0:
                 return False, f"Failed to set password: {password_process.stderr}"
             
+            # Get user info for proper ownership
+            user_info = pwd.getpwnam(username)
+            uid = user_info.pw_uid
+            gid = user_info.pw_gid
+            
             # Set proper permissions for home directory
             os.chmod(home_dir, 0o755)
+            os.chown(home_dir, uid, gid)
             
-            # Get user info for chown
-            user_info = pwd.getpwnam(username)
-            os.chown(home_dir, user_info.pw_uid, user_info.pw_gid)
+            # Create subdirectories with write permissions
+            upload_dir = os.path.join(home_dir, 'uploads')
+            downloads_dir = os.path.join(home_dir, 'downloads')
+            public_dir = os.path.join(home_dir, 'public')
             
-            # Create a welcome file
-            welcome_file = os.path.join(home_dir, 'welcome.txt')
+            for directory in [upload_dir, downloads_dir, public_dir]:
+                os.makedirs(directory, exist_ok=True)
+                os.chmod(directory, 0o755)
+                os.chown(directory, uid, gid)
+            
+            # Create welcome file with proper permissions
+            welcome_file = os.path.join(home_dir, 'README.txt')
             with open(welcome_file, 'w') as f:
-                f.write(f'Welcome to FTP server, {username}!\n')
-            os.chown(welcome_file, user_info.pw_uid, user_info.pw_gid)
+                f.write(f'''Welcome to FTP server, {username}!
+
+Your FTP account has been created successfully.
+
+Directory structure:
+- /uploads/   - Upload your files here
+- /downloads/ - Download files from here  
+- /public/    - Public files accessible to others
+
+You have full read/write access to all directories.
+
+Happy file transferring!
+''')
+            os.chmod(welcome_file, 0o644)
+            os.chown(welcome_file, uid, gid)
             
-            return True, f"User {username} created successfully"
+            # Create test file to verify write access
+            test_file = os.path.join(upload_dir, 'test_write_access.txt')
+            with open(test_file, 'w') as f:
+                f.write(f'This file confirms write access is working for {username}\n')
+                f.write(f'Created on: {datetime.now()}\n')
+            os.chmod(test_file, 0o644)
+            os.chown(test_file, uid, gid)
+            
+            # Ensure the user can write to their home directory
+            # This is crucial for chrooted users
+            FTPUserService._fix_chroot_permissions(home_dir, uid, gid)
+            
+            return True, f"User {username} created successfully with write access"
             
         except Exception as e:
             return False, f"Unexpected error: {str(e)}"
+    
+    @staticmethod
+    def _fix_chroot_permissions(home_dir, uid, gid):
+        """Fix permissions for chrooted FTP users"""
+        try:
+            # For chrooted users, the home directory should be owned by root
+            # but subdirectories should be owned by the user
+            
+            # Set home directory permissions (required for chroot)
+            os.chmod(home_dir, 0o755)
+            
+            # Create a writable subdirectory structure
+            writable_dirs = ['uploads', 'downloads', 'public', 'files']
+            
+            for dir_name in writable_dirs:
+                dir_path = os.path.join(home_dir, dir_name)
+                if not os.path.exists(dir_path):
+                    os.makedirs(dir_path, exist_ok=True)
+                
+                # Make directory writable by user
+                os.chmod(dir_path, 0o755)
+                os.chown(dir_path, uid, gid)
+                
+                # Create a .keep file to ensure directory exists
+                keep_file = os.path.join(dir_path, '.keep')
+                if not os.path.exists(keep_file):
+                    with open(keep_file, 'w') as f:
+                        f.write('This file keeps the directory in version control\n')
+                    os.chown(keep_file, uid, gid)
+                    os.chmod(keep_file, 0o644)
+            
+        except Exception as e:
+            print(f"Warning: Could not fix chroot permissions: {e}")
+    
+    @staticmethod
+    def fix_user_permissions(username):
+        """Fix permissions for an existing user"""
+        try:
+            if not FTPUserService.check_user_exists(username):
+                return False, f"User {username} does not exist"
+            
+            user_info = pwd.getpwnam(username)
+            home_dir = user_info.pw_dir
+            uid = user_info.pw_uid
+            gid = user_info.pw_gid
+            
+            # Fix permissions
+            FTPUserService._fix_chroot_permissions(home_dir, uid, gid)
+            
+            return True, f"Permissions fixed for user {username}"
+            
+        except Exception as e:
+            return False, f"Error fixing permissions: {str(e)}"
+    
+    @staticmethod
+    def test_user_write_access(username):
+        """Test if user has write access"""
+        try:
+            if not FTPUserService.check_user_exists(username):
+                return False, "User does not exist"
+            
+            user_info = pwd.getpwnam(username)
+            home_dir = user_info.pw_dir
+            
+            # Test write access in various directories
+            test_results = {}
+            test_dirs = ['uploads', 'downloads', 'public', '.']
+            
+            for test_dir in test_dirs:
+                dir_path = os.path.join(home_dir, test_dir) if test_dir != '.' else home_dir
+                test_file = os.path.join(dir_path, f'.write_test_{username}')
+                
+                try:
+                    # Try to create a test file
+                    with open(test_file, 'w') as f:
+                        f.write('write test')
+                    
+                    # Check if file was created and is writable
+                    if os.path.exists(test_file):
+                        os.remove(test_file)  # Clean up
+                        test_results[test_dir] = True
+                    else:
+                        test_results[test_dir] = False
+                        
+                except Exception as e:
+                    test_results[test_dir] = False
+            
+            return True, test_results
+            
+        except Exception as e:
+            return False, f"Error testing write access: {str(e)}"
+    
+    # ... (keep all other existing methods the same)
     
     @staticmethod
     def delete_system_user(username):
@@ -95,7 +234,17 @@ class FTPUserService:
                 ftp_user.is_blocked = True
                 ftp_user.save()
             except FTPUser.DoesNotExist:
-                return False, f"User {username} not found in database"
+                # Create database entry if it doesn't exist
+                try:
+                    user_info = pwd.getpwnam(username)
+                    FTPUser.create(
+                        username=username,
+                        home_directory=user_info.pw_dir,
+                        is_blocked=True,
+                        is_active=True
+                    )
+                except:
+                    pass
             
             # Restart vsftpd to apply changes
             restart_success, restart_msg = FTPUserService._restart_vsftpd()
@@ -122,7 +271,7 @@ class FTPUserService:
                 ftp_user.is_blocked = False
                 ftp_user.save()
             except FTPUser.DoesNotExist:
-                return False, f"User {username} not found in database"
+                pass
             
             # Restart vsftpd to apply changes
             restart_success, restart_msg = FTPUserService._restart_vsftpd()

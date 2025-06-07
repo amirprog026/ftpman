@@ -280,6 +280,25 @@ def debug_blocked_users():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/users/<username>/fix-permissions', methods=['POST'])
+@login_required
+def fix_user_permissions(username):
+    try:
+        success, message = FTPUserService.fix_user_permissions(username)
+        return jsonify({'success': success, 'message': message})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+
+@app.route('/api/users/<username>/test-write', methods=['GET'])
+@login_required
+def test_user_write_access(username):
+    try:
+        success, result = FTPUserService.test_user_write_access(username)
+        return jsonify({'success': success, 'result': result})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+
+
 # Create default admin user if not exists
 def create_default_admin():
     try:

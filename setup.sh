@@ -116,31 +116,59 @@ cat > /etc/vsftpd/vsftpd.conf << 'EOF'
 # VSFTPD Configuration for VSFTPD Manager
 listen=YES
 listen_ipv6=NO
+
+# Anonymous settings
 anonymous_enable=NO
+anon_upload_enable=NO
+anon_mkdir_write_enable=NO
+
+# Local user settings
 local_enable=YES
 write_enable=YES
 local_umask=022
-dirmessage_enable=YES
-use_localtime=YES
-xferlog_enable=YES
-connect_from_port_20=YES
+
+# Security settings
 chroot_local_user=YES
 allow_writeable_chroot=YES
 secure_chroot_dir=/var/run/vsftpd/empty
-pam_service_name=vsftpd
-rsa_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
-rsa_private_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
-ssl_enable=NO
-userlist_enable=YES
-userlist_file=/etc/vsftpd/user_list
-userlist_deny=YES
+
+# Directory settings
+dirmessage_enable=YES
+use_localtime=YES
+
+# Logging
+xferlog_enable=YES
 log_ftp_protocol=YES
 xferlog_file=/var/log/vsftpd.log
 dual_log_enable=YES
 vsftpd_log_file=/var/log/vsftpd.log
+
+# Connection settings
+connect_from_port_20=YES
+idle_session_timeout=600
+data_connection_timeout=120
+
+# SSL/TLS (disabled for now)
+ssl_enable=NO
+rsa_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
+rsa_private_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
+
+# User list settings
+userlist_enable=YES
+userlist_file=/etc/vsftpd/user_list
+userlist_deny=YES
+
+# Passive mode settings
 pasv_enable=YES
 pasv_min_port=21100
 pasv_max_port=21110
+
+# File permissions
+file_open_mode=0666
+local_umask=022
+
+# Additional write permissions
+chmod_enable=YES
 EOF
 
 # Get server IP for passive mode
