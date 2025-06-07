@@ -2,6 +2,7 @@ import subprocess
 import os
 import pwd
 import grp
+import tempfile
 from models import FTPUser, db
 from datetime import datetime
 
@@ -10,7 +11,7 @@ class FTPUserService:
     
     @staticmethod
     def create_system_user(username, password, home_dir):
-        """Create system user for FTP"""
+        """Create system user for FTP (running as root)"""
         try:
             # Check if user already exists
             try:
@@ -22,7 +23,7 @@ class FTPUserService:
             
             # Create user with home directory
             cmd = [
-                'sudo', 'useradd', 
+                'useradd', 
                 '-m',                    # Create home directory
                 '-d', home_dir,         # Set home directory
                 '-s', '/bin/bash',      # Set shell to allow FTP
@@ -33,20 +34,29 @@ class FTPUserService:
             if result.returncode != 0:
                 return False, f"Failed to create user: {result.stderr}"
             
-            # Set password using chpasswd with echo
-            password_cmd = f"echo '{username}:{password}' | sudo chpasswd"
-            result = subprocess.run(password_cmd, shell=True, capture_output=True, text=True)
-            if result.returncode != 0:
-                return False, f"Failed to set password: {result.stderr}"
+            # Set password using chpasswd
+            password_process = subprocess.run(
+                ['chpasswd'],
+                input=f"{username}:{password}",
+                text=True,
+                capture_output=True
+            )
+            
+            if password_process.returncode != 0:
+                return False, f"Failed to set password: {password_process.stderr}"
             
             # Set proper permissions for home directory
-            subprocess.run(['sudo', 'chmod', '755', home_dir], capture_output=True, text=True)
-            subprocess.run(['sudo', 'chown', f'{username}:{username}', home_dir], capture_output=True, text=True)
+            os.chmod(home_dir, 0o755)
+            
+            # Get user info for chown
+            user_info = pwd.getpwnam(username)
+            os.chown(home_dir, user_info.pw_uid, user_info.pw_gid)
             
             # Create a welcome file
-            welcome_cmd = f"echo 'Welcome to FTP server, {username}!' | sudo tee {home_dir}/welcome.txt > /dev/null"
-            subprocess.run(welcome_cmd, shell=True, capture_output=True, text=True)
-            subprocess.run(['sudo', 'chown', f'{username}:{username}', f'{home_dir}/welcome.txt'], capture_output=True, text=True)
+            welcome_file = os.path.join(home_dir, 'welcome.txt')
+            with open(welcome_file, 'w') as f:
+                f.write(f'Welcome to FTP server, {username}!\n')
+            os.chown(welcome_file, user_info.pw_uid, user_info.pw_gid)
             
             return True, f"User {username} created successfully"
             
@@ -55,13 +65,13 @@ class FTPUserService:
     
     @staticmethod
     def delete_system_user(username):
-        """Delete system user"""
+        """Delete system user (running as root)"""
         try:
             # Remove from blocked list first
             FTPUserService._remove_from_user_list(username)
             
             # Delete system user and home directory
-            result = subprocess.run(['sudo', 'userdel', '-r', username], capture_output=True, text=True)
+            result = subprocess.run(['userdel', '-r', username], capture_output=True, text=True)
             if result.returncode != 0:
                 return False, f"Failed to delete user: {result.stderr}"
             
@@ -130,26 +140,24 @@ class FTPUserService:
         try:
             # Ensure the user_list file exists
             if not os.path.exists(FTPUserService.USER_LIST_FILE):
-                subprocess.run(['sudo', 'touch', FTPUserService.USER_LIST_FILE], check=True)
-                subprocess.run(['sudo', 'chmod', '644', FTPUserService.USER_LIST_FILE], check=True)
+                with open(FTPUserService.USER_LIST_FILE, 'w') as f:
+                    pass
+                os.chmod(FTPUserService.USER_LIST_FILE, 0o644)
             
             # Check if user is already in the list
             existing_users = []
             try:
                 with open(FTPUserService.USER_LIST_FILE, 'r') as f:
                     existing_users = [line.strip() for line in f.readlines()]
-            except (FileNotFoundError, PermissionError):
+            except FileNotFoundError:
                 pass
             
             if username in existing_users:
                 return True, f"User {username} already in block list"
             
-            # Add user to the list using echo and tee
-            add_cmd = f"echo '{username}' | sudo tee -a {FTPUserService.USER_LIST_FILE} > /dev/null"
-            result = subprocess.run(add_cmd, shell=True, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                return False, f"Failed to add user to block list: {result.stderr}"
+            # Add user to the list
+            with open(FTPUserService.USER_LIST_FILE, 'a') as f:
+                f.write(f"{username}\n")
             
             return True, f"User {username} added to block list"
             
@@ -164,30 +172,15 @@ class FTPUserService:
                 return True, "User list file doesn't exist"
             
             # Read current list
-            try:
-                with open(FTPUserService.USER_LIST_FILE, 'r') as f:
-                    lines = f.readlines()
-            except (FileNotFoundError, PermissionError):
-                return True, "User list file doesn't exist or not accessible"
+            with open(FTPUserService.USER_LIST_FILE, 'r') as f:
+                lines = f.readlines()
             
             # Filter out the username
             filtered_lines = [line for line in lines if line.strip() != username]
             
-            # Create temporary file with filtered content
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', delete=False) as tmp_file:
-                tmp_file.writelines(filtered_lines)
-                temp_path = tmp_file.name
-            
-            # Move temp file to actual file with sudo
-            result = subprocess.run(['sudo', 'mv', temp_path, FTPUserService.USER_LIST_FILE], 
-                                  capture_output=True, text=True)
-            if result.returncode != 0:
-                os.unlink(temp_path)  # Clean up temp file
-                return False, f"Failed to update user list: {result.stderr}"
-            
-            subprocess.run(['sudo', 'chmod', '644', FTPUserService.USER_LIST_FILE], 
-                         capture_output=True, text=True)
+            # Write back the filtered list
+            with open(FTPUserService.USER_LIST_FILE, 'w') as f:
+                f.writelines(filtered_lines)
             
             return True, f"User {username} removed from block list"
             
@@ -198,7 +191,7 @@ class FTPUserService:
     def _restart_vsftpd():
         """Restart VSFTPD service"""
         try:
-            result = subprocess.run(['sudo', 'systemctl', 'restart', 'vsftpd'], 
+            result = subprocess.run(['systemctl', 'restart', 'vsftpd'], 
                                   capture_output=True, text=True)
             if result.returncode != 0:
                 return False, f"Failed to restart VSFTPD: {result.stderr}"
