@@ -42,124 +42,243 @@ def dashboard():
 @app.route('/api/users', methods=['GET'])
 @login_required
 def get_ftp_users():
-    users = FTPUser.select().dicts()
-    return jsonify(list(users))
+    try:
+        # Get users from database and sync with system users
+        db_users = list(FTPUser.select().dicts())
+        system_users = FTPUserService.get_system_users()
+        blocked_users = FTPUserService.get_blocked_users()
+        
+        # Combine information
+        users_data = []
+        
+        # Add database users
+        for user in db_users:
+            user['exists_in_system'] = user['username'] in system_users
+            user['is_blocked'] = user['username'] in blocked_users
+            users_data.append(user)
+        
+        # Add system users not in database
+        for sys_user in system_users:
+            if not any(u['username'] == sys_user for u in db_users):
+                users_data.append({
+                    'id': None,
+                    'username': sys_user,
+                    'home_directory': FTPUserService.get_user_home_dir(sys_user),
+                    'is_active': True,
+                    'is_blocked': sys_user in blocked_users,
+                    'created_at': None,
+                    'created_by': None,
+                    'exists_in_system': True
+                })
+        
+        return jsonify(users_data)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/users', methods=['POST'])
 @login_required
 def create_ftp_user():
-    data = request.json
-    username = data.get('username')
-    password = data.get('password')
-    home_dir = data.get('home_directory', f'/home/{username}')
-    
-    # Create system user
-    success, message = FTPUserService.create_system_user(username, password, home_dir)
-    
-    if success:
-        # Create database record
-        ftp_user = FTPUser.create(
-            username=username,
-            home_directory=home_dir,
-            created_by=current_user
-        )
-        return jsonify({'success': True, 'message': message})
-    else:
-        return jsonify({'success': False, 'message': message}), 400
+    try:
+        data = request.json
+        username = data.get('username', '').strip()
+        password = data.get('password', '').strip()
+        home_dir = data.get('home_directory', '').strip()
+        
+        # Validation
+        if not username:
+            return jsonify({'success': False, 'message': 'Username is required'}), 400
+        
+        if not password:
+            return jsonify({'success': False, 'message': 'Password is required'}), 400
+            
+        if len(password) < 6:
+            return jsonify({'success': False, 'message': 'Password must be at least 6 characters'}), 400
+        
+        # Set default home directory if not provided
+        if not home_dir:
+            home_dir = f'/home/{username}'
+        
+        # Check if user already exists
+        if FTPUserService.check_user_exists(username):
+            return jsonify({'success': False, 'message': 'User already exists'}), 400
+        
+        # Create system user
+        success, message = FTPUserService.create_system_user(username, password, home_dir)
+        
+        if success:
+            # Create database record
+            try:
+                ftp_user = FTPUser.create(
+                    username=username,
+                    home_directory=home_dir,
+                    created_by=current_user,
+                    is_active=True,
+                    is_blocked=False
+                )
+                return jsonify({'success': True, 'message': message, 'user_id': ftp_user.id})
+            except Exception as db_error:
+                return jsonify({'success': True, 'message': f"{message} (DB warning: {str(db_error)})"})
+        else:
+            return jsonify({'success': False, 'message': message}), 400
+            
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Unexpected error: {str(e)}'}), 500
 
 @app.route('/api/users/<username>', methods=['DELETE'])
 @login_required
 def delete_ftp_user(username):
-    success, message = FTPUserService.delete_system_user(username)
-    
-    if success:
-        # Delete from database
-        FTPUser.delete().where(FTPUser.username == username).execute()
-        return jsonify({'success': True, 'message': message})
-    else:
-        return jsonify({'success': False, 'message': message}), 400
+    try:
+        # Delete system user
+        success, message = FTPUserService.delete_system_user(username)
+        
+        if success:
+            # Delete from database if exists
+            try:
+                ftp_user = FTPUser.get(FTPUser.username == username)
+                ftp_user.delete_instance()
+            except FTPUser.DoesNotExist:
+                pass  # User not in database, that's OK
+            
+            return jsonify({'success': True, 'message': message})
+        else:
+            return jsonify({'success': False, 'message': message}), 400
+            
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Unexpected error: {str(e)}'}), 500
 
 @app.route('/api/users/<username>/block', methods=['POST'])
 @login_required
 def block_user(username):
-    success, message = FTPUserService.block_user(username)
-    return jsonify({'success': success, 'message': message})
+    try:
+        success, message = FTPUserService.block_user(username)
+        return jsonify({'success': success, 'message': message})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
 
 @app.route('/api/users/<username>/unblock', methods=['POST'])
 @login_required
 def unblock_user(username):
-    success, message = FTPUserService.unblock_user(username)
-    return jsonify({'success': success, 'message': message})
+    try:
+        success, message = FTPUserService.unblock_user(username)
+        return jsonify({'success': success, 'message': message})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
 
 @app.route('/api/logs', methods=['GET'])
 @login_required
 def get_logs():
-    # Sync logs first
-    FTPLogService.sync_logs_to_db()
-    
-    # Get logs from database
-    logs = FTPLog.select().order_by(FTPLog.timestamp.desc()).limit(100).dicts()
-    return jsonify(list(logs))
+    try:
+        # Get logs from FTP log service
+        logs = FTPLogService.get_recent_logs(limit=100)
+        return jsonify(logs)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/connections', methods=['GET'])
 @login_required
 def get_connections():
-    # Update connections
-    FTPConnectionService.update_connections()
-    
-    # Get active connections
-    connections = FTPConnection.select().where(FTPConnection.is_active == True).dicts()
-    return jsonify(list(connections))
+    try:
+        # Get active connections
+        connections = FTPConnectionService.get_active_connections()
+        return jsonify(connections)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/connections/<int:pid>/kill', methods=['POST'])
 @login_required
 def kill_connection(pid):
-    success, message = FTPConnectionService.kill_connection(pid)
-    return jsonify({'success': success, 'message': message})
+    try:
+        success, message = FTPConnectionService.kill_connection(pid)
+        return jsonify({'success': success, 'message': message})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
 
 @app.route('/api/config', methods=['GET'])
 @login_required
 def get_config():
-    config = FTPConfigService.read_config()
-    # Add metadata
-    config_with_meta = {}
-    for key, value in config.items():
-        if key in FTPConfigService.CONFIG_OPTIONS:
-            config_with_meta[key] = {
-                'value': value,
-                'type': FTPConfigService.CONFIG_OPTIONS[key]['type'],
-                'description': FTPConfigService.CONFIG_OPTIONS[key]['description']
-            }
-    return jsonify(config_with_meta)
+    try:
+        config = FTPConfigService.read_config()
+        # Add metadata
+        config_with_meta = {}
+        for key, value in config.items():
+            if key in FTPConfigService.CONFIG_OPTIONS:
+                config_with_meta[key] = {
+                    'value': value,
+                    'type': FTPConfigService.CONFIG_OPTIONS[key]['type'],
+                    'description': FTPConfigService.CONFIG_OPTIONS[key]['description']
+                }
+            else:
+                config_with_meta[key] = {
+                    'value': value,
+                    'type': 'string',
+                    'description': 'Custom configuration option'
+                }
+        return jsonify(config_with_meta)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/config', methods=['POST'])
 @login_required
 def update_config():
-    data = request.json
-    key = data.get('key')
-    value = data.get('value')
-    
-    success, message = FTPConfigService.update_config(key, value, current_user)
-    return jsonify({'success': success, 'message': message})
+    try:
+        data = request.json
+        key = data.get('key')
+        value = data.get('value')
+        
+        success, message = FTPConfigService.update_config(key, value, current_user)
+        return jsonify({'success': success, 'message': message})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
 
 @app.route('/api/stats', methods=['GET'])
 @login_required
 def get_stats():
-    # Get statistics for dashboard
-    total_users = FTPUser.select().count()
-    active_connections = FTPConnection.select().where(FTPConnection.is_active == True).count()
-    blocked_users = FTPUser.select().where(FTPUser.is_blocked == True).count()
-    
-    return jsonify({
-        'total_users': total_users,
-        'active_connections': active_connections,
-        'blocked_users': blocked_users
-    })
+    try:
+        # Get statistics for dashboard
+        system_users = FTPUserService.get_system_users()
+        blocked_users = FTPUserService.get_blocked_users()
+        active_connections = FTPConnectionService.get_active_connections()
+        
+        total_users = len(system_users)
+        total_blocked = len(blocked_users)
+        total_connections = len(active_connections)
+        
+        # Get recent activity
+        recent_logs = FTPLogService.get_recent_logs(limit=10)
+        
+        return jsonify({
+            'total_users': total_users,
+            'active_connections': total_connections,
+            'blocked_users': total_blocked,
+            'recent_activity': len(recent_logs),
+            'vsftpd_status': FTPConfigService.get_service_status()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # Health check endpoint
 @app.route('/health')
 def health_check():
     return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+
+# Debug endpoints
+@app.route('/api/debug/system-users')
+@login_required
+def debug_system_users():
+    try:
+        users = FTPUserService.get_system_users()
+        return jsonify({'system_users': users})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/debug/blocked-users')
+@login_required
+def debug_blocked_users():
+    try:
+        users = FTPUserService.get_blocked_users()
+        return jsonify({'blocked_users': users})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # Create default admin user if not exists
 def create_default_admin():
